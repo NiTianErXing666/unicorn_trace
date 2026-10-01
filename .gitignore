@@ -1,0 +1,19 @@
+# build artifacts
+build/
+app/build/
+app/.cxx/
+.gradle/
+.cxx/
+local.properties
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# os
+.DS_Store
+
+# cli test artifacts
+*.o
+*.log
