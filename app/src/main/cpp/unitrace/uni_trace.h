@@ -128,6 +128,18 @@ void ut_set_time_simulation(int enable, uint64_t cpu_hz);
  * path == NULL disables. Returns 0 on success, -1 if the file cannot be
  * opened. Takes effect for all subsequent invokeCall runs. */
 int ut_set_trace_file(const char* path);
+
+/* ---- BL-call observation ---------------------------------------------
+ * A lightweight observation mode (independent of trace_level): records
+ * only function calls and returns:
+ *
+ *   call libc.so!strlen(0x7f.. "hello", 0x0, 0x0, 0x0) from 0x..
+ *   ret  0x6 "hello"
+ *
+ * Arguments / return values that point at printable C strings are shown
+ * inline in quotes. Output comes back via ut_last_trace() and is included
+ * in ut_set_trace_file() logs. Much cheaper than level-3 tracing. */
+void ut_set_call_trace(int enable);
 void ut_debug_watch(uint64_t lo, uint64_t hi);
 uint64_t ut_get_brk_base(void);
 

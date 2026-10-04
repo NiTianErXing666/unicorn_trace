@@ -86,6 +86,12 @@ Java_com_example_testtrace_MainActivity_nativeInfo(JNIEnv* env, jobject) {
 }
 
 /* configure automatic per-run trace logging to a file (null disables) */
+extern "C" JNIEXPORT void JNICALL
+Java_com_example_testtrace_MainActivity_nativeSetCallTrace(JNIEnv*, jobject,
+                                                           jint enable) {
+    ut_set_call_trace(enable);
+}
+
 extern "C" JNIEXPORT jint JNICALL
 Java_com_example_testtrace_MainActivity_nativeSetTraceFile(JNIEnv* env, jobject,
                                                            jstring path) {

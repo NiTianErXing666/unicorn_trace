@@ -37,6 +37,10 @@ var CONFIG = {
     // trace 级别：0 关 1 系统调用 2 +基本块 3 指令级(GumTrace 格式)
     traceLevel: 3,
 
+    // BL 调用观测（独立于 traceLevel）：只记录 bl/blr 调用与返回，
+    // 参数/返回值是可打印字符串时自动内联显示——观测开销远低于级别 3
+    callTrace: false,
+
     // 配置完成后自动调用一次首个 hook 目标（验证整条链路），不需要设 false
     selfTest: false,
 
@@ -138,11 +142,13 @@ var UnitraceEngine = (function () {
             fn.ut_set_trace_file= resolve("ut_set_trace_file", "int", ["pointer"]);
             fn.ut_last_error    = resolve("ut_last_error", "pointer", []);
             fn.ut_engine_info   = resolve("ut_engine_info", "pointer", []);
+            fn.ut_set_call_trace = resolve("ut_set_call_trace", "void", ["int"]);
             fn.ut_last_stats    = resolve("ut_last_stats", "pointer", []);
 
             var rc = fn.ut_init();
             if (rc !== 0) throw new Error("ut_init failed: " + lastError());
             fn.ut_set_level(CONFIG.traceLevel);
+            if (CONFIG.callTrace) fn.ut_set_call_trace(1);
             if (CONFIG.traceFile) {
                 // 显式路径立即生效
                 setupTraceFile(CONFIG.traceFile);
@@ -244,6 +250,7 @@ var UnitraceEngine = (function () {
         unregisterHook: function (addr) { delete hookedTargets[addr.toString()]; },
         info: function () { return loaded ? fn.ut_engine_info().readCString() : "not loaded"; },
         setLevel: function (lv) { if (loaded) fn.ut_set_level(lv); },
+        setCallTrace: function (on) { if (loaded) fn.ut_set_call_trace(on ? 1 : 0); },
         setTraceFile: function (path) {
             if (loaded)
                 return fn.ut_set_trace_file(Memory.allocUtf8String(path));

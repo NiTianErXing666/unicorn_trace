@@ -20,6 +20,7 @@
  *    emulated SIGSEGV and stop emulation.
  */
 #include "uni_trace.h"
+#include "ut_internal.h"
 
 #include <unicorn/unicorn.h>
 #include <unicorn/arm64.h>
@@ -182,6 +183,10 @@ struct Engine {
     bool emu_stop = false;
     bool cpu_profile_applied = false;
     std::vector<uc_hook> tracer_hooks;
+
+    /* BL-call observation (ut_calltrace.cpp) */
+    bool call_obs = false;
+    uint64_t mirror_pages_run = 0;   /* runaway guard, reset per run */
 
     /* automatic trace log file (ut_set_trace_file) */
     FILE* trace_fp = nullptr;
@@ -422,6 +427,17 @@ static bool mirror_into_uc(Engine* e, uint64_t start, uint64_t end, int real_pro
     }
     uc_add_map_rec(e, start, end);
     e->stats.mirrored_pages += (end - start) / e->page;
+    e->mirror_pages_run += (end - start) / e->page;
+    if (e->mirror_pages_run > 20000) {
+        /* runaway guard: a wild guest pointer walking the address space
+         * would otherwise mirror forever; fail the run with a clear cause */
+        snprintf(e->fault_desc, sizeof(e->fault_desc),
+                 "mirror runaway: %llu pages this run (possible wild pointer)",
+                 (unsigned long long)e->mirror_pages_run);
+        e->emu_stop = true;
+        uc_emu_stop(e->uc);
+        return false;
+    }
     /* record with the ACTUAL mapped address (tag included): tagged aliases
      * are distinct unicorn mappings and must not be reported as covered */
     for (uint64_t a = start; a < end; a += e->page)
@@ -1153,17 +1169,7 @@ static void hook_intr(uc_engine* uc, uint32_t intno, void* ud) {
 /* ------------------------------------------------------------------ */
 /* GumTrace-style instruction tracer                                   */
 /* ------------------------------------------------------------------ */
-struct CachedInsn {
-    char text[200];                 /* "ldr x0, [x1, #0x10]" */
-    cs_regs regs_read;
-    uint8_t n_read;
-    struct Wr { char name[8]; int uc; bool simd; } wr[8];
-    uint8_t n_written;
-    uint8_t groups[8]; uint8_t n_groups;
-    int64_t branch_imm;             /* target for b/bl when direct */
-    uint8_t branch_reg;             /* cs reg id for br/blr when indirect */
-    bool is_bl, is_blr, is_ret, is_b;
-};
+/* CachedInsn lives in ut_internal.h (shared with ut_calltrace.cpp) */
 
 struct TraceState {
     csh cs = 0;
@@ -1317,7 +1323,14 @@ static void tracer_loc_prefix(uint64_t pc, char* out, size_t outsz) {
 
 /* append a line to the trace buffer (skips when the cap is reached) */
 static void tracer_line(const char* fmt, ...) {
-    if (g_tr.buf.size() >= g_tr.buf_cap) return;
+    if (g_tr.buf.size() >= g_tr.buf_cap) {
+        static bool warned = false;
+        if (!warned) {
+            warned = true;
+            LOGI("instruction trace buffer capped at %zu bytes", g_tr.buf_cap);
+        }
+        return;
+    }
     char tmp[512];
     va_list ap;
     va_start(ap, fmt);
@@ -1817,6 +1830,7 @@ static void refresh_all_mirror(Engine* e) {
 static void hook_block(uc_engine* uc, uint64_t address, uint32_t size, void* ud) {
     Engine* e = (Engine*)ud;
     e->stats.block_count++;
+    ut_callobs_on_block(uc, address, size);   /* cheap no-op unless enabled */
     if (e->time_sim) {
         /* advance the virtual clock by this block's instruction count so
          * timing detection measures real-hardware ticks-per-instruction */
@@ -2419,16 +2433,29 @@ static long* run_invoke(Engine* e, uint64_t address, uint64_t* args,
                  "args_length must be 0..8, got %d", args_length);
         return nullptr;
     }
+    if (args_length > 0 && !args) {
+        snprintf(e->last_error, sizeof(e->last_error),
+                 "args is null but args_length=%d", args_length);
+        return nullptr;
+    }
 
     /* per-run state */
     e->blocks.clear();
     e->syscalls.clear();
     e->dirty_pages.clear();
+    e->mirror_pages_run = 0;
     e->fault_desc[0] = 0;
     e->last_error[0] = 0;
     e->emu_stop = false;
     e->stats = {};
 
+    if (e->call_obs || e->trace_level >= 3) tracer_init();
+    if (e->call_obs) {
+        ut_callobs_reset();
+        uc_hook ch = 0;
+        uc_hook_add(e->uc, &ch, UC_HOOK_CODE, (void*)ut_callobs_on_insn, e, 1, 0);
+        e->tracer_hooks.push_back(ch);
+    }
     if (e->trace_level >= 3) {
         tracer_init();
         g_tr.buf.clear();
@@ -2618,6 +2645,8 @@ size_t ut_debug_peek_guest(uint64_t addr, void* buf, size_t len) {
 const char* ut_last_trace(void) {
     if (g_eng && g_eng->trace_level >= 3 && !g_tr.buf.empty())
         return g_tr.buf.c_str();
+    if (ut_callobs_text()[0])
+        return ut_callobs_text();
     return g_eng ? g_eng->last_trace.c_str() : "";
 }
 
@@ -2659,12 +2688,55 @@ static void trace_file_dump_run(Engine* e, uint64_t fn_addr) {
             (unsigned long long)e->stats.instr_count,
             (unsigned long long)e->stats.block_count,
             (unsigned long long)e->stats.syscall_count);
-    const char* text = (e->trace_level >= 3 && !g_tr.buf.empty())
-                           ? g_tr.buf.c_str()
-                           : e->last_trace.c_str();
+    const char* text;
+    if (e->trace_level >= 3 && !g_tr.buf.empty())
+        text = g_tr.buf.c_str();
+    else if (e->call_obs && ut_callobs_text()[0])
+        text = ut_callobs_text();
+    else
+        text = e->last_trace.c_str();
     size_t n = strlen(text);
     if (n) fwrite(text, 1, n, e->trace_fp);
     fputc('\n', e->trace_fp);
     fflush(e->trace_fp);
 }
 const struct ut_stats* ut_last_stats(void) { return g_eng ? &g_eng->stats : nullptr; }
+
+/* ---- internal exports for observation modules (see ut_internal.h) ---- */
+extern "C" {
+
+uintptr_t ut_cs_handle(void) {
+    tracer_init();
+    return (uintptr_t)g_tr.cs;
+}
+
+const struct CachedInsn* ut_disasm_insn(uc_engine* uc, uint64_t pc) {
+    return disasm_cache(uc, pc);
+}
+
+uint64_t ut_read_cs_reg(uc_engine* uc, unsigned cs_reg) {
+    tracer_init();
+    for (auto& m : g_regmap)
+        if ((unsigned)m.cs == cs_reg) return uc_read_reg(uc, m.uc, m.simd);
+    return 0;
+}
+
+uint64_t ut_follow_plt(uc_engine* uc, uint64_t target) {
+    return follow_plt(uc, target);
+}
+
+const char* ut_sym_cached(uint64_t pc) {
+    if (g_eng) return sym_cached(g_eng, pc);
+    static char b[160];
+    return ut_symbolize(pc, b, sizeof(b));
+}
+
+bool ut_probe_cstring(uc_engine* uc, uint64_t addr, char* out, size_t cap) {
+    return tracer_guest_str(uc, addr, out, cap);
+}
+
+void ut_engine_set_call_obs(int enable) {
+    if (g_eng) g_eng->call_obs = enable != 0;
+}
+
+} /* extern "C" */

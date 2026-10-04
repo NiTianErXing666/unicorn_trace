@@ -27,7 +27,8 @@ target_compile_options(testtarget PRIVATE -fno-omit-frame-pointer -O2)
 # ---- main app library: JNI bridge + unicorn trace engine ----
 add_library(${CMAKE_PROJECT_NAME} SHARED
         native-lib.cpp
-        unitrace/uni_trace.cpp)
+        unitrace/uni_trace.cpp
+        unitrace/ut_calltrace.cpp)
 target_include_directories(${CMAKE_PROJECT_NAME} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/unitrace
         ${CMAKE_CURRENT_SOURCE_DIR}/testtarget)
@@ -41,6 +42,7 @@ target_link_libraries(${CMAKE_PROJECT_NAME}
 add_executable(unitrace_cli
         cli/cli_main.cpp
         unitrace/uni_trace.cpp
+        unitrace/ut_calltrace.cpp
         testtarget/testtarget.c)
 target_include_directories(unitrace_cli PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/unitrace

@@ -113,6 +113,7 @@ adb shell "cd /data/local/tmp && UT_TRACE=2 LD_LIBRARY_PATH=. ./unitrace_cli 3" 
 | 大内存 | 64KB memcpy + FNV 校验（SIMD 写、脏页刷回、写穿透） |
 | CPU 指纹 | CTR_EL0/DCZID_EL0 == 宿主值；SVE trap（同真机）；DotProd/LSE 指令可执行 |
 | GumTrace trace | 指令行/写回/mem_r/mem_w/call(PLT 穿透+字符串参数)/ret/svc 七类行 |
+| BL 调用观测 | 只记 bl/blr+ret；参数/返回值字符串自动识别（"hi unicorn" 实测）；开销远低于指令级 |
 
 ## GumTrace 风格指令级 trace（capstone 反汇编）
 
@@ -160,6 +161,25 @@ TCG 仿真比真机慢 20~60 倍，计时检测（读 `cntvct_el0` 前后取差�
 仿真内(关闭后): 上述值会放大 20~60 倍，一测即穿
 ```
 
+## BL 调用观测模式（轻量观测）
+
+`ut_set_call_trace(1)`（独立于 trace 级别，Java：`nativeSetCallTrace`，frida：`CONFIG.callTrace`）——只记录函数调用与返回，参数/返回值指向可打印 C 字符串时自动内联显示：
+
+```
+call libc.so!__strlen_chk+0x0(0x7a79b04ea4 | 0x59d119a00c "hi unicorn", 0xffffffffffffffff, 0x0, 0x0) from 0x59d0f25aa0
+ret  0xa
+ret  0x59d119a00c "hi unicorn"
+```
+
+实现要点：每个基本块入口用 capstone 扫一次找出 bl/blr/ret 站点（按 pc 缓存），单条全局指令钩子在非调用指令上只做一次哈希查找——观测开销远低于级别 3。PLT 自动穿透解析真实符号。输出走 `ut_last_trace()` 并包含在 `ut_set_trace_file()` 日志里。
+
+## 稳定性与可维护性
+
+- **观测模块独立编译单元**：`ut_internal.h` 定义核心与观测模块间的窄接口（CachedInsn/反汇编/寄存器读取/PLT 穿透/字符串探测），新观测特性落在自己的 .cpp（首例 `ut_calltrace.cpp`），核心不再膨胀
+- **镜像失控保护**：单次 run 镜像超过 20000 页即中止并给出明确原因（防野指针无限镜像）
+- **缓冲上限告警**：指令 trace（64MB）与调用观测（8MB）触顶一次性提示，不再静默丢弃
+- **invokeCall 参数判空**：args 为 NULL 且 args_length>0 直接报错
+
 ## 性能优化（热路径缓存一览）
 
 | 热路径 | 频率 | 优化 | 收益 |
@@ -195,7 +215,9 @@ attach → hook tt_add → 仿真返回 42 → unitrace.log 自动记录完整 r
 
 ```
 testtrace/app/src/main/cpp/
-├── unitrace/uni_trace.{h,cpp}   # 引擎全部逻辑（含 CPU profile 采集与应用）
+├── unitrace/uni_trace.{h,cpp}   # 引擎核心（镜像/syscall/信号/虚拟时钟/CPU 指纹）
+├── unitrace/ut_internal.h       # 核心↔观测模块的内部接口
+├── unitrace/ut_calltrace.cpp    # BL 调用观测（参数/返回值字符串自动识别）
 ├── testtarget/testtarget.c      # 被测函数库
 ├── native-lib.cpp               # JNI 桥 + 测试驱动
 ├── capstone/                    # capstone 5.0.6（仅 AArch64，指令级 trace 用）

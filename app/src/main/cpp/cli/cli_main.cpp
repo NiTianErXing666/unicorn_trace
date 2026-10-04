@@ -43,6 +43,7 @@ long tt_lse_probe(long*, long);
 long tt_time_probe_loop(long);
 long tt_time_probe_clock(long);
 long tt_time_probe_sleep(long);
+long tt_call_demo(const char*);
 }
 
 static int g_pass = 0, g_fail = 0;
@@ -422,6 +423,42 @@ int main(int argc, char** argv) {
         bool ok = ns >= 40000000 && ns <= 65000000;
         printf("[%s] %-26s slept=%ld ns (want ~50ms)\n",
                ok ? "PASS" : "FAIL", "virt-clock sleep probe", ns);
+        ok ? g_pass++ : g_fail++;
+        if (only == tn++) return 0;
+    }
+
+    {   /* 31: BL-only call observation with string args/returns */
+        static char inbuf[64];
+        strcpy(inbuf, "hi unicorn");
+        uint64_t a[1] = {(uint64_t)(uintptr_t)inbuf};
+        ut_set_call_trace(1);
+        /* warm-up run resolves lazy PLT entries, then the recorded run's
+         * call targets symbolize cleanly and carry the string args */
+        long* w = invokeCall((void*)tt_call_demo, a, 1);
+        ut_free_result(w);
+        long* r = invokeCall((void*)tt_call_demo, a, 1);
+        ut_set_call_trace(0);
+        bool ok = r && r[0] == (long)strlen("hi unicorn") + 1;
+        ut_free_result(r);
+        const char* txt = ut_last_trace();
+        bool hasCall = strstr(txt, "call ") != nullptr;
+        bool hasStr = strstr(txt, "\"hi unicorn\"") != nullptr;
+        bool hasRet = strstr(txt, "ret  0x") != nullptr &&
+                      strstr(txt, "ret  0xb") != nullptr;  /* 10+1 */
+        printf("---- call-obs (%d lines-ish, call=%d str=%d ret=%d) ----\n",
+               (int)(strlen(txt) ? 1 : 0), hasCall, hasStr, hasRet);
+        int lines = 0;
+        const char* q = txt;
+        while (*q && lines < 12) {
+            const char* nl = strchr(q, '\n');
+            size_t n = nl ? (size_t)(nl - q) : strlen(q);
+            printf("%.*s\n", (int)n, q);
+            if (!nl) break;
+            q = nl + 1;
+            lines++;
+        }
+        ok = ok && hasCall && hasStr && hasRet;
+        printf("[%s] call-obs strings\n", ok ? "PASS" : "FAIL");
         ok ? g_pass++ : g_fail++;
         if (only == tn++) return 0;
     }

@@ -91,5 +91,6 @@ public class MainActivity extends AppCompatActivity {
     public native String nativeGetError();
     public native String nativeInfo();
     public native int nativeSetTraceFile(String path);
+    public native void nativeSetCallTrace(int enable);
     public native String nativeRunTests();
 }

@@ -295,3 +295,16 @@ long tt_time_probe_sleep(long ms) {
     clock_gettime(CLOCK_MONOTONIC, &b);
     return (long)((b.tv_sec - a.tv_sec) * 1000000000L + (b.tv_nsec - a.tv_nsec));
 }
+
+/* ---- call-observation demo: direct internal calls carrying strings ---- */
+__attribute__((noinline)) static long tt_callee_len(const char* s) {
+    return (long)strlen(s);
+}
+__attribute__((noinline)) static const char* tt_callee_dup(const char* s) {
+    return s;   /* pretend transformation; returns a string pointer */
+}
+long tt_call_demo(const char* s) {
+    long n = tt_callee_len(s);
+    const char* r = tt_callee_dup(s);
+    return n + (r[0] != 0 ? 1 : 0);
+}
