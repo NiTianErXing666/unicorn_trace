@@ -183,6 +183,11 @@ struct Engine {
     bool cpu_profile_applied = false;
     std::vector<uc_hook> tracer_hooks;
 
+    /* automatic trace log file (ut_set_trace_file) */
+    FILE* trace_fp = nullptr;
+    char trace_path[512] = {0};
+    uint64_t trace_run_seq = 0;
+
     /* anti timing-detection virtual clock */
     bool time_sim = true;
     uint64_t virt_ns = 0;             /* virtual ns since engine init */
@@ -646,6 +651,7 @@ static void tracer_svc(uint64_t nr, const uint64_t a[6], long ret,
                        const char* path_str);
 static bool tracer_guest_str(uc_engine* uc, uint64_t addr, char* out, size_t outsz);
 static void virt_timespec(Engine* e, uint64_t addr, uint64_t extra_ns);
+static void trace_file_dump_run(Engine* e, uint64_t fn_addr);
 
 static long raw_syscall6(long nr, uint64_t a0, uint64_t a1, uint64_t a2,
                          uint64_t a3, uint64_t a4, uint64_t a5) {
@@ -2524,6 +2530,7 @@ static long* run_invoke(Engine* e, uint64_t address, uint64_t* args,
     }
 
     if (e->stats.exit_reason != 1 && err != UC_ERR_OK && !e->emu_stop) {
+        trace_file_dump_run(e, address);   /* partial trace on error */
         uint64_t epc = reg_read(e->uc, UC_ARM64_REG_PC);
         char esym[160];
         ut_symbolize(epc, esym, sizeof(esym));
@@ -2535,6 +2542,7 @@ static long* run_invoke(Engine* e, uint64_t address, uint64_t* args,
         return nullptr;
     }
     if (e->stats.exit_reason != 1 && e->emu_stop) {
+        trace_file_dump_run(e, address);   /* partial trace on fault */
         snprintf(e->last_error, sizeof(e->last_error), "%s",
                  e->fault_desc[0] ? e->fault_desc : "emulation stopped");
         build_trace_text(e);
@@ -2545,6 +2553,7 @@ static long* run_invoke(Engine* e, uint64_t address, uint64_t* args,
     if (e->stats.instr_count == 0)
         e->stats.instr_count = e->stats.block_count * 4; /* rough */
     build_trace_text(e);
+    trace_file_dump_run(e, address);
     return (long*)1; /* success sentinel */
 }
 
@@ -2623,4 +2632,39 @@ long ut_trace_to_file(const char* path) {
 }
 
 size_t ut_trace_size(void) { return g_tr.buf.size(); }
+
+int ut_set_trace_file(const char* path) {
+    if (!g_eng) return -1;
+    if (g_eng->trace_fp) { fclose(g_eng->trace_fp); g_eng->trace_fp = nullptr; }
+    g_eng->trace_path[0] = 0;
+    if (!path) return 0;                       /* disable */
+    FILE* f = fopen(path, "wb");
+    if (!f) return -1;
+    g_eng->trace_fp = f;
+    snprintf(g_eng->trace_path, sizeof(g_eng->trace_path), "%s", path);
+    g_eng->trace_run_seq = 0;
+    return 0;
+}
+
+/* called at the end of every run: append this run's trace with a header */
+static void trace_file_dump_run(Engine* e, uint64_t fn_addr) {
+    if (!e->trace_fp) return;
+    e->trace_run_seq++;
+    char sym[160];
+    ut_symbolize(fn_addr, sym, sizeof(sym));
+    fprintf(e->trace_fp,
+            "==== run #%llu fn=0x%llx [%s] insns=%llu blocks=%llu syscalls=%llu ====\n",
+            (unsigned long long)e->trace_run_seq,
+            (unsigned long long)fn_addr, sym,
+            (unsigned long long)e->stats.instr_count,
+            (unsigned long long)e->stats.block_count,
+            (unsigned long long)e->stats.syscall_count);
+    const char* text = (e->trace_level >= 3 && !g_tr.buf.empty())
+                           ? g_tr.buf.c_str()
+                           : e->last_trace.c_str();
+    size_t n = strlen(text);
+    if (n) fwrite(text, 1, n, e->trace_fp);
+    fputc('\n', e->trace_fp);
+    fflush(e->trace_fp);
+}
 const struct ut_stats* ut_last_stats(void) { return g_eng ? &g_eng->stats : nullptr; }

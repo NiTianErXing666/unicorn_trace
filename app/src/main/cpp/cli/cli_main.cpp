@@ -349,16 +349,24 @@ int main(int argc, char** argv) {
         uint64_t a3[1] = {(uint64_t)(uintptr_t)inbuf};
         int old_lvl = ut_get_trace_level();
         ut_set_trace_level(3);
+        const char* tf = getenv("UT_FILE");
+        if (tf && ut_set_trace_file(tf) == 0)
+            printf("[trace] auto-log enabled -> %s\n", tf);
         long* r = invokeCall((void*)tt_add, a2, 2);
         long* r2 = invokeCall((void*)tt_strdup_upper, a3, 1);
         ut_set_trace_level(old_lvl);
         bool ok = r && r[0] == 42 && r2 && r2[0] != 0;
         ut_free_result(r);
         ut_free_result(r2);
-        const char* tf = getenv("UT_FILE");
         if (tf) {
-            long n = ut_trace_to_file(tf);
-            printf("[trace] %ld bytes -> %s\n", n, tf);
+            FILE* chk = fopen(tf, "r");
+            if (chk) {
+                int runs = 0; char lb[256];
+                while (fgets(lb, sizeof(lb), chk))
+                    if (strncmp(lb, "==== run #", 10) == 0) runs++;
+                fclose(chk);
+                printf("[trace] %s contains %d appended runs\n", tf, runs);
+            }
         }
         printf("---- trace head (%zu bytes) ----\n", ut_trace_size());
         int lines = 0;

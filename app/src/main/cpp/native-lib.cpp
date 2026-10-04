@@ -85,6 +85,17 @@ Java_com_example_testtrace_MainActivity_nativeInfo(JNIEnv* env, jobject) {
     return env->NewStringUTF(ut_engine_info());
 }
 
+/* configure automatic per-run trace logging to a file (null disables) */
+extern "C" JNIEXPORT jint JNICALL
+Java_com_example_testtrace_MainActivity_nativeSetTraceFile(JNIEnv* env, jobject,
+                                                           jstring path) {
+    if (!path) return ut_set_trace_file(nullptr);
+    const char* p = env->GetStringUTFChars(path, nullptr);
+    int r = ut_set_trace_file(p);
+    env->ReleaseStringUTFChars(path, p);
+    return r;
+}
+
 /* ------------------------------------------------------------------ */
 /* test battery: runs target functions inside the emulator             */
 /* ------------------------------------------------------------------ */

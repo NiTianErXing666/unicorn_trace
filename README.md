@@ -136,7 +136,10 @@ svc write(0x1, 0x7f..., 0x23) = 0x23
 - `ret:`：返回时打印 x0
 - `svc 名(参数) = 返回值`：系统调用行，openat 类附带 `path:` 字符串
 - 写回/内存字段采用 pending-line 模型：指令前缀在执行前生成，内存访问在执行中收集，寄存器值在下一条指令钩子时读取——三类信息严格对齐到正确的指令
-- 缓冲上限 64MB，`ut_trace_to_file(path)` 全量落盘；CLI：`UT_TRACE=3 UT_FILE=/data/local/tmp/t.log ./unitrace_cli 27`
+- 缓冲上限 64MB；两种落盘方式：
+  - `ut_trace_to_file(path)`：一次性导出当前缓冲
+  - **`ut_set_trace_file(path)`（推荐）**：初始化时传入日志路径，之后**每次 invokeCall 自动追加**一段带 run 头的完整 trace（`==== run #N fn=0x... [模块!符号] insns/blocks/syscalls ====`），失败的 run 也记录部分 trace；传 NULL 关闭
+- CLI：`UT_TRACE=3 UT_FILE=/data/local/tmp/t.log ./unitrace_cli`（内部走 ut_set_trace_file，多 run 自动累积）；Java：`nativeSetTraceFile(path)`
 
 ## 反时间检测（虚拟时钟）
 

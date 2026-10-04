@@ -118,6 +118,16 @@ size_t ut_trace_size(void);
  * ticks-per-instruction as on the real core, regardless of how slow the
  * emulation actually runs. cpu_hz=0 keeps the current value. */
 void ut_set_time_simulation(int enable, uint64_t cpu_hz);
+
+/* ---- trace file -------------------------------------------------------
+ * Configure a log file for automatic trace capture: after EVERY invokeCall
+ * the run's trace (GumTrace-style instruction log at level 3, or the
+ * syscall/block summary at lower levels) is appended with a run header.
+ * The file is created (truncated) when this is set; subsequent runs keep
+ * appending to it.
+ * path == NULL disables. Returns 0 on success, -1 if the file cannot be
+ * opened. Takes effect for all subsequent invokeCall runs. */
+int ut_set_trace_file(const char* path);
 void ut_debug_watch(uint64_t lo, uint64_t hi);
 uint64_t ut_get_brk_base(void);
 
