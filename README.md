@@ -184,6 +184,13 @@ TCG 仿真比真机慢 20~60 倍，计时检测（读 `cntvct_el0` 前后取差�
 - 浮点参数不走 x0..x7 约定（可后续加 v0..v7 支持）
 - 性能为原生的大约 1/20~1/60（TCG 翻译 + 钩子开销），trace 级别越高越慢
 
+## Frida 集成
+
+`frida/unitrace_helper.js`：加载引擎 so、hook 指定 JNI/native 函数、命中
+即仿真执行并自动把 trace 追加到日志文件。部署与用法见
+[frida/README-frida.md](frida/README-frida.md)（真机 Pixel 5 已端到端验证：
+attach → hook tt_add → 仿真返回 42 → unitrace.log 自动记录完整 run）。
+
 ## 目录
 
 ```
@@ -192,6 +199,8 @@ testtrace/app/src/main/cpp/
 ├── testtarget/testtarget.c      # 被测函数库
 ├── native-lib.cpp               # JNI 桥 + 测试驱动
 ├── capstone/                    # capstone 5.0.6（仅 AArch64，指令级 trace 用）
+├── frida/unitrace_helper.js     # Frida 注入 + hook + trace 落盘脚本
+├── frida/README-frida.md        # 部署与用法
 ├── cli/cli_main.cpp             # 真机 CLI 自测
 ├── CMakeLists.txt               # unicorn 以 add_subdirectory 集成（仅 aarch64）
 └── unicorn/                     # unicorn 2.1.4 源码（含上文 3 处补丁，搜 "unitrace patch"）
