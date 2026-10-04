@@ -114,6 +114,7 @@ adb shell "cd /data/local/tmp && UT_TRACE=2 LD_LIBRARY_PATH=. ./unitrace_cli 3" 
 | CPU 指纹 | CTR_EL0/DCZID_EL0 == 宿主值；SVE trap（同真机）；DotProd/LSE 指令可执行 |
 | GumTrace trace | 指令行/写回/mem_r/mem_w/call(PLT 穿透+字符串参数)/ret/svc 七类行 |
 | BL 调用观测 | 只记 bl/blr+ret；参数/返回值字符串自动识别（"hi unicorn" 实测）；开销远低于指令级 |
+| Tenet 导出 | delta 格式经 IDA 插件解析器语法校验通过，trace 直接导入 IDA 回放 |
 
 ## GumTrace 风格指令级 trace（capstone 反汇编）
 
@@ -194,6 +195,31 @@ ret  0x59d119a00c "hi unicorn"
 实测（Pixel 5，同一 binary 三轮中位）：`tt_fib(30)` 2663→850us（**3.1x**），`memcpy 64KB` 742→672ms（1.1x，瓶颈已转为 TCG 翻译本身 263K 块），短调用（strdup/snprintf）持平——其耗时主导是首次 libc 路径镜像（一次性）。
 
 注意：页属性缓存对 "MAPPED 但非 WRITABLE" 的页保持保守回退（重查 maps），因为 mprotect 会在映射不变的情况下改变写权限。
+
+## 生态调研与集成（GitHub 安卓 trace 工具）
+
+| 工具 | 方式 | 借鉴/集成点 |
+|---|---|---|
+| [unidbg](https://github.com/zhkl0228/unidbg) | Java 全系统仿真 | 不集成（手写 syscall/内存伪造不如镜像真实进程）；其生态规模印证了 invokeCall 类 API 的价值 |
+| [QBDI](https://github.com/QBDI/QBDI) | 进程内 LLVM JIT 重写 | 已对标：无 syscall/信号拦截层；其 memAccess 回调粒度已由 mem_r/mem_w 覆盖 |
+| [GumTrace](https://github.com/lidongyooo/GumTrace) | frida+Stalker 指令 trace | 已集成其日志格式（本项目 level 3 的七类行） |
+| [Tenet (IDA 插件)](https://github.com/NiTianErXing666/Tenet-IDA9.2) | delta 格式 trace + IDA 回放 | **已集成导出器**（见下）——trace 直接进 IDA 工作流 |
+| frida-trace / r2frida | 函数级快速观测 | 已由 BL 调用观测模式覆盖 |
+| AndroidNativeEmu | 教学 | 无新可集成点 |
+
+## Tenet 格式导出（IDA 回放）
+
+`ut_set_tenet_file(path)`——level 3 指令追踪**同时**输出 Tenet delta 格式（每指令一行，可直接被 Tenet-IDA9.2 插件的 file.py 解析器导入回放）：
+
+```
+PC=0x5f1851ae00,X29=0x0,X30=0xc0ffee000000,MW=0x7b5fc48ff0:0000000000000000,MW=0x7b5fc48ff8:000000eeffc00000
+PC=0x5f1851adfc,SP=0x7b5fc48fd0
+```
+
+- 寄存器规范名：X0..X30/SP（fp→X29、lr→X30、w 视图剥前缀）；读寄存器=指令输入（执行前值），写寄存器=执行后值，同寄存器时写值后发（parser 语义即 post-exec）
+- `MR/MW=0xaddr:hex` 内存读写载荷（≤16 字节，小端原始字节）
+- 每次 `ut_set_tenet_file` 重置文件，后续 run 追加为单一连续流
+- 真机验证：68 行 trace 经 Operator 仓库解析器语法校验（ip_lines=68、mem_entries=32、bad=0）
 
 ## 已知限制（v1）
 

@@ -1171,6 +1171,10 @@ static void hook_intr(uc_engine* uc, uint32_t intno, void* ud) {
 /* ------------------------------------------------------------------ */
 /* CachedInsn lives in ut_internal.h (shared with ut_calltrace.cpp) */
 
+/* Tenet-format export (defined near the file tail) */
+static FILE* g_tenet_fp;
+static void tenet_emit(uc_engine* uc, uint64_t pc);
+
 struct TraceState {
     csh cs = 0;
     std::unordered_map<uint64_t, CachedInsn> icache;
@@ -1368,9 +1372,10 @@ static bool tracer_guest_str(uc_engine* uc, uint64_t addr, char* out, size_t out
  * state has then advanced past this instruction). */
 struct PendingLine {
     bool valid = false;
+    uint64_t pc = 0;
     char prefix[448];
-    uint64_t mem_r[4]; int mem_r_n = 0;
-    uint64_t mem_w[4]; int mem_w_n = 0;
+    uint64_t mem_r[4]; int mem_rsz[4]; int mem_r_n = 0;
+    uint64_t mem_w[4]; int mem_wsz[4]; int mem_w_n = 0;
     CachedInsn::Wr wr[8]; int wr_n = 0;
     bool is_bl = false, is_blr = false, is_ret = false;
     uint64_t branch_imm = 0;
@@ -1417,6 +1422,7 @@ static uint64_t follow_plt(uc_engine* uc, uint64_t target) {
 
 static void tracer_finalize(uc_engine* uc) {
     if (!g_pend.valid) return;
+    tenet_emit(uc, g_pend.pc);
     /* full line: prefix + memory-access fields observed during execution */
     char tail[160];
     tail[0] = 0;
@@ -1515,6 +1521,7 @@ static void tracer_insn(uc_engine* uc, uint64_t pc) {
 
     g_pend = PendingLine{};
     g_pend.valid = true;
+    g_pend.pc = pc;
     memcpy(g_pend.prefix, line, (size_t)o + 1);
     g_pend.wr_n = ci->n_written;
     memcpy(g_pend.wr, ci->wr, sizeof(ci->wr));
@@ -1528,14 +1535,21 @@ static void tracer_mem(uc_engine* uc, uc_mem_type type, uint64_t address,
                        int size, int64_t value, void* ud) {
     (void)uc; (void)size; (void)value; (void)ud;
     if (!g_pend.valid) return;
+    int sz = size > 0 && size <= 64 ? size : 8;
     if (type == UC_MEM_READ) {
         if (g_pend.mem_r_n < 4 &&
-            (g_pend.mem_r_n == 0 || g_pend.mem_r[g_pend.mem_r_n - 1] != address))
-            g_pend.mem_r[g_pend.mem_r_n++] = address;
+            (g_pend.mem_r_n == 0 || g_pend.mem_r[g_pend.mem_r_n - 1] != address)) {
+            g_pend.mem_r[g_pend.mem_r_n] = address;
+            g_pend.mem_rsz[g_pend.mem_r_n] = sz;
+            g_pend.mem_r_n++;
+        }
     } else if (type == UC_MEM_WRITE) {
         if (g_pend.mem_w_n < 4 &&
-            (g_pend.mem_w_n == 0 || g_pend.mem_w[g_pend.mem_w_n - 1] != address))
-            g_pend.mem_w[g_pend.mem_w_n++] = address;
+            (g_pend.mem_w_n == 0 || g_pend.mem_w[g_pend.mem_w_n - 1] != address)) {
+            g_pend.mem_w[g_pend.mem_w_n] = address;
+            g_pend.mem_wsz[g_pend.mem_w_n] = sz;
+            g_pend.mem_w_n++;
+        }
     }
 }
 
@@ -2458,6 +2472,7 @@ static long* run_invoke(Engine* e, uint64_t address, uint64_t* args,
     }
     if (e->trace_level >= 3) {
         tracer_init();
+        if (g_tr.buf.capacity() < (1u << 20)) g_tr.buf.reserve(1u << 20);
         g_tr.buf.clear();
         g_tr.call_stack.clear();
         g_pend = PendingLine{};
@@ -2547,6 +2562,7 @@ static long* run_invoke(Engine* e, uint64_t address, uint64_t* args,
     }
 
     tracer_finalize(e->uc);
+    if (g_tenet_fp) fflush(g_tenet_fp);
     for (uc_hook h : e->tracer_hooks) uc_hook_del(e->uc, h);
     e->tracer_hooks.clear();
     flush_dirty_pages(e);
@@ -2650,6 +2666,13 @@ const char* ut_last_trace(void) {
     return g_eng ? g_eng->last_trace.c_str() : "";
 }
 
+int ut_set_tenet_file(const char* path) {
+    if (g_tenet_fp) { fclose(g_tenet_fp); g_tenet_fp = nullptr; }
+    if (!path) return 0;
+    g_tenet_fp = fopen(path, "wb");
+    return g_tenet_fp ? 0 : -1;
+}
+
 long ut_trace_to_file(const char* path) {
     if (!path) return -1;
     FILE* f = fopen(path, "wb");
@@ -2701,6 +2724,83 @@ static void trace_file_dump_run(Engine* e, uint64_t fn_addr) {
     fflush(e->trace_fp);
 }
 const struct ut_stats* ut_last_stats(void) { return g_eng ? &g_eng->stats : nullptr; }
+
+/* ---- Tenet-format export --------------------------------------------
+ * One line per instruction (parser: Tenet-IDA9.2 tenet/trace/file.py):
+ *   PC=0x<pc>,<REG>=0x<val>...,MR=0x<addr>:<hex>,MW=0x<addr>:<hex>
+ * Register set = regs READ by the instruction (pre-exec values, i.e. its
+ * inputs) + regs WRITTEN (post-exec values from the write-back pass). */
+static void tenet_emit(uc_engine* uc, uint64_t pc) {
+    if (!g_tenet_fp) return;
+    char line[640];
+    int o = snprintf(line, sizeof(line), "PC=0x%llx", (unsigned long long)pc);
+    /* read registers: values from the pending prefix pass were captured
+     * pre-exec; re-reading now would give post-exec. We instead rely on
+     * the disasm cache + current REG STATE for reads that were inputs —
+     * for the common case inputs are unchanged by their own execution, so
+     * reading them at finalize (before the NEXT instruction runs) yields
+     * exactly the input values for all but the written registers, which
+     * we emit from the write-back set. */
+    const CachedInsn* ci = disasm_cache(uc, pc);
+    if (ci) {
+        /* canonical tenet register names: X0..X30 / SP, uppercase; the
+         * parser matches after .upper() so case is cosmetic, but alias
+         * names (fp/lr/w-views) must map to the canonical set */
+        auto canon = [](const char* in, char* out, size_t cap) -> bool {
+            const char* n = in;
+            if ((n[0] == 'w' || n[0] == 'q') && n[1] >= '0' && n[1] <= '9') n++;
+            if (!strcasecmp(n, "fp")) n = "X29";
+            else if (!strcasecmp(n, "lr")) n = "X30";
+            else if (!strcasecmp(n, "sp")) n = "SP";
+            else if ((n[0] == 'x' || n[0] == 'X') && n[1] >= '0' && n[1] <= '9') {
+                /* Xn stays */
+            } else return false;
+            snprintf(out, cap, "%s", n);
+            for (char* q = out; *q; q++) *q = toupper((unsigned char)*q);
+            return true;
+        };
+        char cn[16];
+        for (int i = 0; i < ci->n_read && o < (int)sizeof(line) - 40; i++) {
+            const char* nm = cs_reg_name((csh)ut_cs_handle(), ci->regs_read[i]);
+            int ureg = -1; bool simd = false;
+            for (auto& m : g_regmap)
+                if (m.cs == (int)ci->regs_read[i]) { ureg = m.uc; simd = m.simd; break; }
+            if (ureg < 0 || !nm || !canon(nm, cn, sizeof(cn))) continue;
+            o += snprintf(line + o, sizeof(line) - o, ",%s=0x%llx", cn,
+                          (unsigned long long)uc_read_reg(uc, ureg, simd));
+        }
+        /* written registers carry post-exec values; when a register is in
+         * BOTH sets the write entry comes later and wins in the parser —
+         * exactly the post-exec semantics we want */
+        for (int i = 0; i < ci->n_written && o < (int)sizeof(line) - 40; i++) {
+            if (!canon(ci->wr[i].name, cn, sizeof(cn))) continue;
+            o += snprintf(line + o, sizeof(line) - o, ",%s=0x%llx", cn,
+                          (unsigned long long)uc_read_reg(uc, ci->wr[i].uc,
+                                                          ci->wr[i].simd));
+        }
+    }
+    /* memory payloads from guest memory (state == post-instruction) */
+    for (int i = 0; i < g_pend.mem_r_n && o < (int)sizeof(line) - 150; i++) {
+        unsigned char d[16] = {0};
+        int sz = g_pend.mem_rsz[i] > 16 ? 16 : g_pend.mem_rsz[i];
+        if (uc_mem_read(uc, g_pend.mem_r[i], d, (size_t)sz) != UC_ERR_OK) continue;
+        o += snprintf(line + o, sizeof(line) - o, ",MR=0x%llx:",
+                      (unsigned long long)g_pend.mem_r[i]);
+        for (int k = 0; k < sz && o < (int)sizeof(line) - 4; k++)
+            o += snprintf(line + o, sizeof(line) - o, "%02x", d[k]);
+    }
+    for (int i = 0; i < g_pend.mem_w_n && o < (int)sizeof(line) - 150; i++) {
+        unsigned char d[16] = {0};
+        int sz = g_pend.mem_wsz[i] > 16 ? 16 : g_pend.mem_wsz[i];
+        if (uc_mem_read(uc, g_pend.mem_w[i], d, (size_t)sz) != UC_ERR_OK) continue;
+        o += snprintf(line + o, sizeof(line) - o, ",MW=0x%llx:",
+                      (unsigned long long)g_pend.mem_w[i]);
+        for (int k = 0; k < sz && o < (int)sizeof(line) - 4; k++)
+            o += snprintf(line + o, sizeof(line) - o, "%02x", d[k]);
+    }
+    fputs(line, g_tenet_fp);
+    fputc('\n', g_tenet_fp);
+}
 
 /* ---- internal exports for observation modules (see ut_internal.h) ---- */
 extern "C" {

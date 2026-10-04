@@ -463,6 +463,44 @@ int main(int argc, char** argv) {
         if (only == tn++) return 0;
     }
 
+    {   /* 32: Tenet-format export (IDA Tenet plugin importable) */
+        ut_set_tenet_file("/data/local/tmp/tenet.trace");
+        ut_set_trace_level(3);
+        static char inbuf[64];
+        strcpy(inbuf, "tenet");
+        uint64_t a[1] = {(uint64_t)(uintptr_t)inbuf};
+        long* r = invokeCall((void*)tt_call_demo, a, 1);
+        ut_set_trace_level(1);
+        ut_set_tenet_file(nullptr);
+        bool ok = r && r[0] == (long)strlen("tenet") + 1;
+        ut_free_result(r);
+        /* verify the file: every line starts with PC=, tokens comma-split,
+         * MR/MW payloads are address:hex pairs (the parser's grammar) */
+        FILE* f = fopen("/data/local/tmp/tenet.trace", "r");
+        int lines = 0, bad = 0;
+        if (f) {
+            char lb[1024];
+            while (fgets(lb, sizeof(lb), f)) {
+                lines++;
+                if (strncmp(lb, "PC=0x", 5) != 0) { bad++; continue; }
+                for (char* t = strtok(lb, ","); t; t = strtok(nullptr, ",")) {
+                    char* eq = strchr(t, '=');
+                    if (!eq) { bad++; break; }
+                    /* MR/MW payloads must be addr:hex */
+                    if (!strncmp(t, "MR=", 3) || !strncmp(t, "MW=", 3)) {
+                        if (!strchr(t, ':')) { bad++; break; }
+                    }
+                }
+            }
+            fclose(f);
+        }
+        ok = ok && lines > 5 && bad == 0;
+        printf("[%s] tenet export (%d lines, %d malformed)\n",
+               ok ? "PASS" : "FAIL", lines, bad);
+        ok ? g_pass++ : g_fail++;
+        if (only == tn++) return 0;
+    }
+
     printf("\n%d passed, %d failed\n", g_pass, g_fail);
     return g_fail ? 1 : 0;
 }

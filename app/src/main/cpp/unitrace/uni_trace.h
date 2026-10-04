@@ -140,6 +140,18 @@ int ut_set_trace_file(const char* path);
  * inline in quotes. Output comes back via ut_last_trace() and is included
  * in ut_set_trace_file() logs. Much cheaper than level-3 tracing. */
 void ut_set_call_trace(int enable);
+
+/* ---- Tenet trace export ----------------------------------------------
+ * While enabled, level-3 instruction tracing ALSO writes a Tenet-format
+ * delta trace (one line per instruction) to the given file:
+ *
+ *   PC=0x5c94b92bd8,X8=0x5c94e07ea4,MR=0x7477820fd8:08e0a7...,MW=...
+ *
+ * Import into IDA with the Tenet plugin (NiTianErXing666/Tenet-IDA9.2)
+ * for replay analysis. Each ut_set_tenet_file() call resets the file;
+ * every subsequent invokeCall run appends to the same stream.
+ * path == NULL disables. Returns -1 on open failure. */
+int ut_set_tenet_file(const char* path);
 void ut_debug_watch(uint64_t lo, uint64_t hi);
 uint64_t ut_get_brk_base(void);
 
