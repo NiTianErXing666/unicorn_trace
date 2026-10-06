@@ -115,6 +115,7 @@ adb shell "cd /data/local/tmp && UT_TRACE=2 LD_LIBRARY_PATH=. ./unitrace_cli 3" 
 | GumTrace trace | 指令行/写回/mem_r/mem_w/call(PLT 穿透+字符串参数)/ret/svc 七类行 |
 | BL 调用观测 | 只记 bl/blr+ret；参数/返回值字符串自动识别（"hi unicorn" 实测）；开销远低于指令级 |
 | Tenet 导出 | delta 格式经 IDA 插件解析器语法校验通过，trace 直接导入 IDA 回放 |
+| XOM/PROT_NONE | --xp 页 /proc/self/mem 镜像执行（movz x0,#77 实测）；快照过期 reparse 自愈（decommit 竞争实测） |
 
 ## GumTrace 风格指令级 trace（capstone 反汇编）
 
@@ -220,6 +221,15 @@ PC=0x5f1851adfc,SP=0x7b5fc48fd0
 - `MR/MW=0xaddr:hex` 内存读写载荷（≤16 字节，小端原始字节）
 - 每次 `ut_set_tenet_file` 重置文件，后续 run 追加为单一连续流
 - 真机验证：68 行 trace 经 Operator 仓库解析器语法校验（ip_lines=68、mem_entries=32、bad=0）
+
+## 真机踩坑修复（frida 长驻目标进程实测）
+
+| 坑 | 现象 | 修复 |
+|---|---|---|
+| PROT_NONE 误判 | frida 分配页被 arena decommit 波及 + regions 快照过期 → 误报 SIGSEGV | fault 分支强制 reparse 一次自愈，页恢复可访问则重走镜像路径（回归测试：decommit→recommit 后 memcpy 成功） |
+| XOM 页镜像为零 | Android 10 ROM libc .text 是 `--xp`，镜像只拷 PROT_READ 页 → guest 执行全零 UDEF | 拷贝条件扩为 `PROT_READ\|PROT_EXEC` |
+| XOM 拷贝崩宿主 | 直接 memcpy 读 `--xp` 页 SIGSEGV 宿主进程 | 内容读取统一走 `/proc/self/mem` pread（内核 FOLL_FORCE，无视页权限）；可读页保留 memcpy 快路径，不可读且读失败时零填充 + 一次性告警 |
+| 多次 attach 引擎副本 | 每次 frida 会话 Module.load 一份新引擎（frida 卸脚本不卸 so）→ 多份全局状态 init 冲突 | 脚本检测 `libtesttrace.so` 已在进程内则直接复用导出；长会话采集前 force-stop 重启目标仍是稳妥做法 |
 
 ## 已知限制（v1）
 

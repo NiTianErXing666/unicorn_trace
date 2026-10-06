@@ -323,6 +323,32 @@ static void uc_add_map_rec(Engine* e, uint64_t s, uint64_t ed) {
  * `start` may carry a pointer tag (bits 56-63, set by scudo malloc):
  * the alias is mapped AT the tagged address, content comes from the
  * untagged real address, and the caller keeps using the tagged pointer. */
+/* Read real process memory safely. Direct memcpy faults the host on XOM
+ * (--xp .text on some ROMs) and PROT_NONE pages; /proc/self/mem reads go
+ * through the kernel with FOLL_FORCE and succeed regardless of page
+ * permissions. Returns false only when even the kernel path fails
+ * (genuinely unmapped). */
+static int g_self_mem_fd = -1;
+static bool read_real_mem(uint64_t addr, void* buf, size_t n) {
+    if (g_self_mem_fd < 0) return false;
+    size_t done = 0;
+    while (done < n) {
+        ssize_t r = pread64(g_self_mem_fd, (char*)buf + done, n - done,
+                            (off64_t)(addr + done));
+        if (r <= 0) return false;
+        done += (size_t)r;
+    }
+    return true;
+}
+/* fast path for pages known to be readable, safe fallback otherwise */
+static bool read_real_checked(uint64_t addr, void* buf, size_t n, int prot) {
+    if (prot & PROT_READ) {
+        memcpy(buf, (const void*)(uintptr_t)addr, n);
+        return true;
+    }
+    return read_real_mem(addr, buf, n);
+}
+
 static bool mirror_into_uc(Engine* e, uint64_t start, uint64_t end, int real_prot) {
     uint64_t cstart;
     start &= ~(uint64_t)(e->page - 1);
@@ -363,7 +389,10 @@ static bool mirror_into_uc(Engine* e, uint64_t start, uint64_t end, int real_pro
                  (unsigned long long)start, (unsigned long long)end, uc_strerror(err));
         return false;
     }
-    if (real_prot & PROT_READ) {
+    /* copy content for readable AND execute-only (XOM, --xp) regions:
+     * some ROMs map system .text as --xp yet still allow self-reads —
+     * skipping the copy there maps zeros into the guest (UDEF on fetch) */
+    if (real_prot & (PROT_READ | PROT_EXEC)) {
         /* copy content in chunks. If a twin alias of the page (same real
          * page, different pointer tag) is already mapped, inherit ITS
          * content — alias views of one real page must never diverge */
@@ -389,11 +418,22 @@ static bool mirror_into_uc(Engine* e, uint64_t start, uint64_t end, int real_pro
                     if (uc_has(e, base | t)) { src = base | t; break; }
                 }
             }
+            bool got = false;
             if (src) {
-                if (uc_mem_read(e->uc, src, tmp.data(), n) != UC_ERR_OK)
-                    memcpy(tmp.data(), (const void*)(uintptr_t)(cstart + off), n);
-            } else {
-                memcpy(tmp.data(), (const void*)(uintptr_t)(cstart + off), n);
+                if (uc_mem_read(e->uc, src, tmp.data(), n) == UC_ERR_OK)
+                    got = true;
+            }
+            if (!got)
+                got = read_real_checked(cstart + off, tmp.data(), n, real_prot);
+            if (!got) {
+                static bool warned = false;
+                if (!warned) {
+                    warned = true;
+                    LOGW("mirror: unreadable real page 0x%llx (no READ/EXEC or "
+                         "/proc/self/mem unavailable); guest copy stays zero",
+                         (unsigned long long)(start + off));
+                }
+                memset(tmp.data(), 0, n);
             }
             /* NOP scudo's pointer-tag instructions in the guest copy only */
             if (!e->tag_insn_addrs.empty()) {
@@ -1652,6 +1692,19 @@ static bool hook_mem_invalid(uc_engine* uc, uc_mem_type type,
         return false;
     }
     if (prot == PROT_NONE) {
+        /* the regions snapshot may be stale: frida/scudo arenas decommit
+         * (mprotect NONE) and recommit around us. Re-parse once and
+         * self-heal when the page became accessible; the retried access
+         * re-enters this hook and takes the normal mirror path. */
+        parse_maps(e);
+        const Region* fr = find_region(e, address);
+        int fprot = fr ? fr->prot : -1;
+        if (fprot > 0 && fprot != PROT_NONE) {
+            e->page_attr_invalidate();
+            LOGW("PROT_NONE fault @0x%llx self-healed after reparse (now prot=%d)",
+                 (unsigned long long)address, fprot);
+            return true;
+        }
         snprintf(e->fault_desc, sizeof(e->fault_desc),
                  "emulated SIGSEGV: %s @ 0x%llx hits a PROT_NONE page (pc=0x%llx)",
                  type == UC_MEM_FETCH_UNMAPPED ? "fetch" :
@@ -2258,6 +2311,8 @@ static int apply_cpu_profile(uc_engine* uc) {
     return 0;
 }
 
+void ut_refresh_maps(void) { if (g_eng) parse_maps(g_eng); }
+
 int ut_set_cpu_profile(const char* name) {
     if (!name) return -1;
     if (strcmp(name, "host") == 0) g_cpu_prof.host_mode = true;
@@ -2295,6 +2350,11 @@ int ut_init(void) {
     if (e->init_ok) return 0;
 
     e->page = (size_t)sysconf(_SC_PAGESIZE);
+    /* kernel-mediated reader for XOM/PROT_NONE pages (see read_real_mem) */
+    g_self_mem_fd = open("/proc/self/mem", O_RDONLY);
+    if (g_self_mem_fd < 0)
+        LOGW("/proc/self/mem unavailable (%s): XOM pages cannot be mirrored",
+             strerror(errno));
     parse_maps(e);
 
     /* make sure the magic return page is really unmapped */

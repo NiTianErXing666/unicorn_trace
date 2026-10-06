@@ -152,6 +152,9 @@ void ut_set_call_trace(int enable);
  * every subsequent invokeCall run appends to the same stream.
  * path == NULL disables. Returns -1 on open failure. */
 int ut_set_tenet_file(const char* path);
+
+/* debug/tests: force a /proc/self/maps snapshot refresh */
+void ut_refresh_maps(void);
 void ut_debug_watch(uint64_t lo, uint64_t hi);
 uint64_t ut_get_brk_base(void);
 

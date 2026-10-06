@@ -10,6 +10,7 @@
 #include <dlfcn.h>
 #include <unistd.h>
 #include <signal.h>
+#include <sys/mman.h>
 #include <time.h>
 
 #include "uni_trace.h"
@@ -498,6 +499,39 @@ int main(int argc, char** argv) {
         printf("[%s] tenet export (%d lines, %d malformed)\n",
                ok ? "PASS" : "FAIL", lines, bad);
         ok ? g_pass++ : g_fail++;
+        if (only == tn++) return 0;
+    }
+
+    {   /* 33: XOM (--xp) page execution — mirror must copy via /proc/self/mem */
+        void* pg = mmap(nullptr, 4096, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        uint32_t code[2] = {0xd28009a0, 0xd65f03c0};   /* movz x0,#77; ret */
+        memcpy(pg, code, sizeof(code));
+        __builtin___clear_cache((char*)pg, (char*)pg + sizeof(code));
+        mprotect(pg, 4096, PROT_EXEC);                 /* drop READ: pure XOM */
+        long* r = invokeCall(pg, nullptr, 0);
+        bool ok = r && r[0] == 77;
+        mprotect(pg, 4096, PROT_READ | PROT_WRITE);
+        munmap(pg, 4096);
+        check("xom exec (via /proc/self/mem)", r, ok);
+        ut_free_result(r);
+        if (only == tn++) return 0;
+    }
+    {   /* 34: stale PROT_NONE snapshot self-heal (decommit/recommit race) */
+        void* pg = mmap(nullptr, 8192, PROT_NONE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        ut_init();                       /* regions snapshot sees PROT_NONE */
+        ut_refresh_maps();
+        mprotect(pg, 4096, PROT_READ | PROT_WRITE);    /* recommit behind the snapshot */
+        *(long*)pg = 0;
+        static char src[16];
+        memcpy(src, "heal", 4);
+        uint64_t a[3] = {(uint64_t)(uintptr_t)pg, (uint64_t)(uintptr_t)src, 16};
+        long* r = invokeCall((void*)tt_memcpy_test, a, 3);
+        bool ok = r && memcmp(pg, "heal", 4) == 0;
+        munmap(pg, 8192);
+        check("PROT_NONE stale snapshot heals", r, ok);
+        ut_free_result(r);
         if (only == tn++) return 0;
     }
 

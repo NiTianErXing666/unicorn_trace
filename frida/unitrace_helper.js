@@ -125,13 +125,20 @@ var UnitraceEngine = (function () {
     function ensureLoaded() {
         if (loaded) return true;
         try {
-            // libc++_shared.so 必须先行，且总是加载自己这份：app 自带的
-            // libc++_shared 位于其 classloader-namespace，我们引擎在
-            // default namespace 里的 DT_NEEDED 解析看不到它
-            var h = dlopenSo(CONFIG.cxxSharedPath, "libc++_shared.so");
-            if (!h) console.log("[!] libc++_shared.so not loaded (continuing)");
-            if (!dlopenSo(CONFIG.traceLibraryPath, "libtesttrace.so"))
-                throw new Error("failed to load " + CONFIG.traceLibraryPath);
+            // 多次 attach 防护：前一个 frida 会话 Module.load 的引擎副本仍
+            // 在进程里（frida 卸载脚本不会卸 so）。重复加载会产生多份各自
+            // 持有全局状态的副本，导致 init 冲突。已存在则直接复用。
+            if (Process.findModuleByName("libtesttrace.so")) {
+                console.log("[+] libtesttrace.so already in process, reusing");
+            } else {
+                // libc++_shared.so 必须先行，且总是加载自己这份：app 自带的
+                // libc++_shared 位于其 classloader-namespace，我们引擎在
+                // default namespace 里的 DT_NEEDED 解析看不到它
+                var h = dlopenSo(CONFIG.cxxSharedPath, "libc++_shared.so");
+                if (!h) console.log("[!] libc++_shared.so not loaded (continuing)");
+                if (!dlopenSo(CONFIG.traceLibraryPath, "libtesttrace.so"))
+                    throw new Error("failed to load " + CONFIG.traceLibraryPath);
+            }
             console.log("[+] libtesttrace.so loaded");
 
             fn.ut_init          = resolve("ut_init", "int", []);
